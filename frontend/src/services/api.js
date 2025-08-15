@@ -4,7 +4,7 @@ const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api
 
 // Helper function to get auth token
 const getAuthToken = () => {
-  return localStorage.getItem('authToken');
+  return localStorage.getItem('token');
 };
 
 // Helper function to create headers
@@ -63,7 +63,7 @@ export const authAPI = {
   },
 
   logout: () => {
-    localStorage.removeItem('authToken');
+    localStorage.removeItem('token');
     localStorage.removeItem('user');
   },
 
@@ -73,7 +73,7 @@ export const authAPI = {
   },
 
   setAuthData: (token, user) => {
-    localStorage.setItem('authToken', token);
+    localStorage.setItem('token', token);
     localStorage.setItem('user', JSON.stringify(user));
   }
 };
@@ -127,9 +127,10 @@ export const cartAPI = {
   },
 
   remove: async (productId) => {
-    return apiCall(`/cart/remove/${productId}`, {
-      method: 'DELETE',
+    return apiCall('/cart/remove', {
+      method: 'POST',
       includeAuth: true,
+      body: JSON.stringify({ productId }),
     });
   },
 
@@ -152,7 +153,7 @@ export const cartAPI = {
 // ===== ORDERS API =====
 export const ordersAPI = {
   create: async (orderData) => {
-    return apiCall('/orders', {
+    return apiCall('/orders/create', {
       method: 'POST',
       includeAuth: true,
       body: JSON.stringify(orderData),
@@ -185,10 +186,32 @@ export const recommendationsAPI = {
 
 // ===== CHATBOT API =====
 export const chatbotAPI = {
-  sendMessage: async (message, userId = null) => {
-    return apiCall('/chatbot', {
+  sendMessage: async (message, userId = null, context = 'jewelry') => {
+    return apiCall('/chat', {
       method: 'POST',
-      body: JSON.stringify({ message, userId }),
+      body: JSON.stringify({ message, userId, context }),
+    });
+  },
+
+  getClothingRecommendations: async (occasion, bodyType, style, budget) => {
+    return apiCall('/chat/clothing-recommendations', {
+      method: 'POST',
+      body: JSON.stringify({ occasion, bodyType, style, budget }),
+    });
+  }
+};
+
+// ===== USER PROFILE API =====
+export const userAPI = {
+  getProfile: async () => {
+    return apiCall('/user/profile', { includeAuth: true });
+  },
+
+  updateProfile: async (profileData) => {
+    return apiCall('/user/profile', {
+      method: 'PUT',
+      includeAuth: true,
+      body: JSON.stringify(profileData),
     });
   }
 };
@@ -208,6 +231,7 @@ const apiService = {
   orders: ordersAPI,
   recommendations: recommendationsAPI,
   chatbot: chatbotAPI,
+  user: userAPI,
   health: healthAPI,
 };
 

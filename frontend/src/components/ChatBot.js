@@ -1,20 +1,23 @@
 // src/components/ChatBot.js
 import React, { useState, useRef, useEffect } from 'react';
-import { MessageCircle, X, Send, Bot, User, Sparkles } from 'lucide-react';
+import { MessageCircle, X, Send, Bot, User, Sparkles, Shirt, Gem } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { chatbotAPI } from '../services/api';
 
 const ChatBot = () => {
   const [isOpen, setIsOpen] = useState(false);
+  const [context, setContext] = useState('jewelry'); // 'jewelry' or 'clothing'
   const [messages, setMessages] = useState([
     {
       id: 1,
-      text: "Hello! I'm your jewelry assistant. I can help you find the perfect earrings, get style recommendations, or answer any questions about our collection. How can I help you today?",
+      text: "Hello! I'm your AI assistant. I can help you with jewelry recommendations and clothing advice. How can I help you today?",
       isBot: true,
       timestamp: new Date()
     }
   ]);
   const [inputMessage, setInputMessage] = useState('');
   const [isTyping, setIsTyping] = useState(false);
+  const [suggestedProducts, setSuggestedProducts] = useState([]);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -32,60 +35,16 @@ const ChatBot = () => {
     }
   }, [isOpen]);
 
-  // AI Response Logic
-  const generateAIResponse = (userMessage) => {
-    const message = userMessage.toLowerCase();
-    
-    // Jewelry-specific responses
-    if (message.includes('earring') || message.includes('ear')) {
-      return "I'd love to help you find the perfect earrings! We have a beautiful collection including studs, hoops, danglers, and ethnic designs. Are you looking for something specific - perhaps for a special occasion or daily wear?";
+  // AI Response Logic - Now using real API
+  const generateAIResponse = async (userMessage) => {
+    try {
+      const response = await chatbotAPI.sendMessage(userMessage, null, context);
+      setSuggestedProducts(response.suggestedProducts || []);
+      return response.response;
+    } catch (error) {
+      console.error('AI response error:', error);
+      return "I'm sorry, I'm having trouble connecting right now. Please try again in a moment.";
     }
-    
-    if (message.includes('recommendation') || message.includes('suggest') || message.includes('recommend')) {
-      return "I can provide personalized recommendations! Our AI-powered recommendation system can suggest earrings based on your face shape, style preferences, and occasions. Would you like to try our recommendation feature?";
-    }
-    
-    if (message.includes('ethnic') || message.includes('traditional') || message.includes('indian')) {
-      return "Our ethnic collection is stunning! We have traditional jhumkas, chandbali, temple jewelry, and contemporary fusion pieces. These are perfect for festivals, weddings, or adding a cultural touch to your style.";
-    }
-    
-    if (message.includes('price') || message.includes('cost') || message.includes('budget')) {
-      return "We offer jewelry for every budget! Our collection ranges from affordable everyday pieces to premium statement jewelry. Could you let me know your budget range so I can suggest the best options?";
-    }
-    
-    if (message.includes('material') || message.includes('gold') || message.includes('silver')) {
-      return "We use high-quality materials including sterling silver, gold-plated pieces, and hypoallergenic options. All our jewelry is crafted with attention to detail and skin-safe materials.";
-    }
-    
-    if (message.includes('size') || message.includes('fit')) {
-      return "Most of our earrings are designed to be comfortable for extended wear. For hoops and studs, we provide size measurements. If you have sensitive ears, I'd recommend our hypoallergenic options.";
-    }
-    
-    if (message.includes('shipping') || message.includes('delivery')) {
-      return "We offer fast and secure shipping! Standard delivery takes 3-5 business days, and we also provide express shipping options. All orders are carefully packaged to ensure your jewelry arrives safely.";
-    }
-    
-    if (message.includes('return') || message.includes('exchange')) {
-      return "We have a customer-friendly return policy! You can return or exchange items within 30 days of purchase in original condition. We want you to be completely happy with your jewelry.";
-    }
-    
-    if (message.includes('hello') || message.includes('hi') || message.includes('hey')) {
-      return "Hello there! ✨ Welcome to our jewelry store. I'm here to help you discover beautiful earrings and find pieces that perfectly match your style. What can I help you find today?";
-    }
-    
-    if (message.includes('thank') || message.includes('thanks')) {
-      return "You're very welcome! I'm here whenever you need help finding the perfect jewelry. Feel free to ask me anything about our collection or if you need styling advice! 💎";
-    }
-    
-    // Default responses
-    const defaultResponses = [
-      "I'd be happy to help you with that! Could you tell me more about what you're looking for in jewelry?",
-      "That's a great question! Our collection has many options. Are you interested in earrings, or would you like to explore other jewelry pieces?",
-      "I'm here to help you find the perfect jewelry! Could you provide a bit more detail about your preferences or what occasion you're shopping for?",
-      "Let me help you with that! Are you looking for something specific in our jewelry collection? I can guide you to the perfect piece."
-    ];
-    
-    return defaultResponses[Math.floor(Math.random() * defaultResponses.length)];
   };
 
   const handleSendMessage = async () => {
@@ -102,18 +61,29 @@ const ChatBot = () => {
     setInputMessage('');
     setIsTyping(true);
 
-    // Simulate AI thinking time
-    setTimeout(() => {
+    try {
+      const aiResponse = await generateAIResponse(inputMessage);
+      
       const botResponse = {
         id: Date.now() + 1,
-        text: generateAIResponse(inputMessage),
+        text: aiResponse,
         isBot: true,
         timestamp: new Date()
       };
 
       setMessages(prev => [...prev, botResponse]);
+    } catch (error) {
+      console.error('Error getting AI response:', error);
+      const errorResponse = {
+        id: Date.now() + 1,
+        text: "I'm sorry, I'm having trouble connecting right now. Please try again.",
+        isBot: true,
+        timestamp: new Date()
+      };
+      setMessages(prev => [...prev, errorResponse]);
+    } finally {
       setIsTyping(false);
-    }, 1000 + Math.random() * 1000);
+    }
   };
 
   const handleKeyPress = (e) => {
@@ -123,11 +93,16 @@ const ChatBot = () => {
     }
   };
 
-  const quickActions = [
+  const quickActions = context === 'jewelry' ? [
     "Show me earrings",
-    "Get recommendations",
+    "Get jewelry recommendations",
     "Ethnic collection",
     "Price ranges"
+  ] : [
+    "Outfit suggestions",
+    "Style advice",
+    "Occasion wear",
+    "Body type tips"
   ];
 
   const handleQuickAction = (action) => {
@@ -164,22 +139,50 @@ const ChatBot = () => {
             className="fixed bottom-6 right-6 z-50 w-96 h-[600px] bg-white dark:bg-gray-800 rounded-2xl shadow-2xl border border-gray-200 dark:border-gray-700 flex flex-col overflow-hidden"
           >
             {/* Header */}
-            <div className="bg-gradient-to-r from-pink-500 to-rose-500 p-4 text-white flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center">
-                  <Sparkles size={20} />
+            <div className="bg-gradient-to-r from-pink-500 to-rose-500 p-4 text-white">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center">
+                    <Sparkles size={20} />
+                  </div>
+                  <div>
+                    <h3 className="font-semibold">AI Assistant</h3>
+                    <p className="text-sm opacity-90">Always here to help ✨</p>
+                  </div>
                 </div>
-                <div>
-                  <h3 className="font-semibold">Jewelry Assistant</h3>
-                  <p className="text-sm opacity-90">Always here to help ✨</p>
-                </div>
+                <button
+                  onClick={() => setIsOpen(false)}
+                  className="p-1 hover:bg-white/20 rounded-lg transition-colors"
+                >
+                  <X size={20} />
+                </button>
               </div>
-              <button
-                onClick={() => setIsOpen(false)}
-                className="p-1 hover:bg-white/20 rounded-lg transition-colors"
-              >
-                <X size={20} />
-              </button>
+              
+              {/* Context Switcher */}
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setContext('jewelry')}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium transition-all ${
+                    context === 'jewelry' 
+                      ? 'bg-white text-pink-600' 
+                      : 'bg-white/20 text-white hover:bg-white/30'
+                  }`}
+                >
+                  <Gem size={16} />
+                  Jewelry
+                </button>
+                <button
+                  onClick={() => setContext('clothing')}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium transition-all ${
+                    context === 'clothing' 
+                      ? 'bg-white text-pink-600' 
+                      : 'bg-white/20 text-white hover:bg-white/30'
+                  }`}
+                >
+                  <Shirt size={16} />
+                  Clothing
+                </button>
+              </div>
             </div>
 
             {/* Messages */}
@@ -234,6 +237,39 @@ const ChatBot = () => {
                     </div>
                   </div>
                 </motion.div>
+              )}
+
+              {/* Product Suggestions */}
+              {suggestedProducts.length > 0 && (
+                <div className="space-y-2 p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg mx-2">
+                  <p className="text-sm text-gray-600 dark:text-gray-300 font-medium">
+                    {context === 'jewelry' ? '💎 Suggested Jewelry:' : '👗 Suggested Items:'}
+                  </p>
+                  <div className="space-y-2">
+                    {suggestedProducts.map((product) => (
+                      <div key={product.id} className="flex items-center gap-3 p-2 bg-white dark:bg-gray-600 rounded-lg border border-gray-200 dark:border-gray-500">
+                        {product.image && (
+                          <img 
+                            src={product.image} 
+                            alt={product.name}
+                            className="w-12 h-12 object-cover rounded-lg"
+                          />
+                        )}
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-gray-800 dark:text-white truncate">
+                            {product.name}
+                          </p>
+                          <p className="text-xs text-gray-500 dark:text-gray-400">
+                            ${product.price}
+                          </p>
+                        </div>
+                        <button className="text-xs bg-pink-500 text-white px-2 py-1 rounded hover:bg-pink-600 transition-colors">
+                          View
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               )}
 
               {/* Quick Actions */}

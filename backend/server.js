@@ -1,16 +1,29 @@
 // server.js
 const express = require('express');
-const mongoose = require('mongoose'); // Added mongoose import
+const mongoose = require('mongoose');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const path = require('path');
 const OpenAI = require('openai');
+const rateLimit = require('express-rate-limit');
+const helmet = require('helmet');
 require('dotenv').config();
 
 const app = express();
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// Security Middleware
+app.use(helmet());
+
+// Rate Limiting
+const limiter = rateLimit({
+  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutes
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100, // limit each IP to 100 requests per windowMs
+  message: 'Too many requests from this IP, please try again later.'
+});
+app.use('/api/', limiter);
 
 // Middleware
 app.use(express.json({ limit: '50mb' }));
@@ -131,12 +144,35 @@ app.get('/api/health', (req, res) => res.json({ status: 'OK' }));
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { name, email, password, phone } = req.body;
+    
+    // Check if user already exists
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ message: 'User with this email already exists' });
+    }
+    
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = new User({ name, email, password: hashedPassword, phone });
     await user.save();
-    const token = jwt.sign({ userId: user._id, email: user.email }, process.env.JWT_SECRET, { expiresIn: '1h' });
-    res.status(201).json({ token });
+    
+    // Create cart and wishlist for new user
+    await Cart.create({ userId: user._id, items: [] });
+    await Wishlist.create({ userId: user._id, items: [] });
+    
+    const token = jwt.sign({ userId: user._id, email: user.email }, process.env.JWT_SECRET, { expiresIn: '24h' });
+    
+    // Return user data without password
+    const userResponse = {
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      phone: user.phone,
+      preferences: user.preferences
+    };
+    
+    res.status(201).json({ token, user: userResponse });
   } catch (error) {
+    console.error('Registration error:', error);
     res.status(400).json({ message: 'Registration failed', error: error.message });
   }
 });
@@ -148,18 +184,81 @@ app.post('/api/auth/login', async (req, res) => {
     if (!user || !await bcrypt.compare(password, user.password)) {
       return res.status(401).json({ message: 'Invalid credentials' });
     }
-    const token = jwt.sign({ userId: user._id, email: user.email }, process.env.JWT_SECRET, { expiresIn: '1h' });
-    res.json({ token });
+    
+    const token = jwt.sign({ userId: user._id, email: user.email }, process.env.JWT_SECRET, { expiresIn: '24h' });
+    
+    // Return user data without password
+    const userResponse = {
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      phone: user.phone,
+      preferences: user.preferences
+    };
+    
+    res.json({ token, user: userResponse });
   } catch (error) {
+    console.error('Login error:', error);
     res.status(500).json({ message: 'Login failed', error: error.message });
   }
 });
 
 app.get('/api/products', async (req, res) => {
   try {
-    const products = await Product.find();
+    const { category, subcategory, search, minPrice, maxPrice, sortBy = 'createdAt', sortOrder = 'desc' } = req.query;
+    
+    let query = {};
+    
+    // Category filter
+    if (category) {
+      query.category = category;
+    }
+    
+    // Subcategory filter
+    if (subcategory) {
+      query.subcategory = subcategory;
+    }
+    
+    // Search filter
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { description: { $regex: search, $options: 'i' } },
+        { tags: { $in: [new RegExp(search, 'i')] } }
+      ];
+    }
+    
+    // Price filter
+    if (minPrice || maxPrice) {
+      query.price = {};
+      if (minPrice) query.price.$gte = parseFloat(minPrice);
+      if (maxPrice) query.price.$lte = parseFloat(maxPrice);
+    }
+    
+    // Sorting
+    const sortOptions = {};
+    sortOptions[sortBy] = sortOrder === 'desc' ? -1 : 1;
+    
+    const products = await Product.find(query)
+      .sort(sortOptions)
+      .limit(50);
+    
     res.json(products);
   } catch (error) {
+    console.error('Get products error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+app.get('/api/products/:productId', async (req, res) => {
+  try {
+    const product = await Product.findById(req.params.productId);
+    if (!product) {
+      return res.status(404).json({ message: 'Product not found' });
+    }
+    res.json(product);
+  } catch (error) {
+    console.error('Get product error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -187,8 +286,12 @@ app.post('/api/cart/add', authMiddleware, async (req, res) => {
       cart.items.push({ product: productId, quantity });
     }
     await cart.save();
-    res.json(cart);
+    
+    // Populate product details for response
+    const populatedCart = await Cart.findById(cart._id).populate('items.product');
+    res.json(populatedCart);
   } catch (error) {
+    console.error('Add to cart error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -200,8 +303,53 @@ app.post('/api/cart/remove', authMiddleware, async (req, res) => {
     if (!cart) return res.status(404).json({ message: 'Cart not found' });
     cart.items = cart.items.filter(item => item.product.toString() !== productId);
     await cart.save();
-    res.json(cart);
+    
+    // Populate product details for response
+    const populatedCart = await Cart.findById(cart._id).populate('items.product');
+    res.json(populatedCart);
   } catch (error) {
+    console.error('Remove from cart error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+app.put('/api/cart/update', authMiddleware, async (req, res) => {
+  try {
+    const { productId, quantity } = req.body;
+    const cart = await Cart.findOne({ userId: req.user.userId });
+    if (!cart) return res.status(404).json({ message: 'Cart not found' });
+    
+    const itemIndex = cart.items.findIndex(item => item.product.toString() === productId);
+    if (itemIndex > -1) {
+      if (quantity <= 0) {
+        cart.items.splice(itemIndex, 1);
+      } else {
+        cart.items[itemIndex].quantity = quantity;
+      }
+      await cart.save();
+      
+      // Populate product details for response
+      const populatedCart = await Cart.findById(cart._id).populate('items.product');
+      res.json(populatedCart);
+    } else {
+      res.status(404).json({ message: 'Product not found in cart' });
+    }
+  } catch (error) {
+    console.error('Update cart error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+app.delete('/api/cart/clear', authMiddleware, async (req, res) => {
+  try {
+    const cart = await Cart.findOne({ userId: req.user.userId });
+    if (!cart) return res.status(404).json({ message: 'Cart not found' });
+    
+    cart.items = [];
+    await cart.save();
+    res.json({ message: 'Cart cleared successfully' });
+  } catch (error) {
+    console.error('Clear cart error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
@@ -247,41 +395,125 @@ app.post('/api/wishlist/remove', authMiddleware, async (req, res) => {
 
 app.post('/api/orders/create', authMiddleware, async (req, res) => {
   try {
-    const { items, total } = req.body;
+    const { items, total, shippingAddress } = req.body;
+    
+    // Validate cart items
+    const cart = await Cart.findOne({ userId: req.user.userId }).populate('items.product');
+    if (!cart || cart.items.length === 0) {
+      return res.status(400).json({ message: 'Cart is empty' });
+    }
+    
     const order = new Order({
       userId: req.user.userId,
-      items,
+      items: cart.items,
       total,
-      status: 'completed' // Fake payment
+      shippingAddress: shippingAddress || {},
+      status: 'completed' // Fake payment - always successful
     });
+    
     await order.save();
+    
+    // Clear cart after successful order
     await Cart.findOneAndUpdate({ userId: req.user.userId }, { items: [] });
+    
+    // Populate product details for response
+    const populatedOrder = await Order.findById(order._id).populate('items.product');
+    res.json(populatedOrder);
+  } catch (error) {
+    console.error('Create order error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+app.get('/api/orders', authMiddleware, async (req, res) => {
+  try {
+    const orders = await Order.find({ userId: req.user.userId })
+      .populate('items.product')
+      .sort({ createdAt: -1 });
+    res.json(orders);
+  } catch (error) {
+    console.error('Get orders error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+app.get('/api/orders/:orderId', authMiddleware, async (req, res) => {
+  try {
+    const order = await Order.findOne({ 
+      _id: req.params.orderId, 
+      userId: req.user.userId 
+    }).populate('items.product');
+    
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found' });
+    }
+    
     res.json(order);
   } catch (error) {
+    console.error('Get order error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
 app.post('/api/chat', async (req, res) => {
-  const { message, userId } = req.body;
+  const { message, userId, context = 'jewelry' } = req.body;
+  
   try {
+    let systemPrompt = '';
+    let suggestedProducts = [];
+    
+    // Determine context and set appropriate system prompt
+    if (context === 'clothing') {
+      systemPrompt = `You are Glimmr's AI fashion assistant specializing in clothing recommendations. 
+      You help users find the perfect outfits for different occasions, body types, and styles. 
+      Provide helpful fashion advice, styling tips, and outfit suggestions. 
+      Be friendly, knowledgeable, and specific in your recommendations.`;
+    } else {
+      systemPrompt = `You are Glimmr's AI jewelry assistant. Provide helpful responses on jewelry, 
+      recommending earrings based on face shape, style, or ethnic outfits (e.g., sarees, lehengas). 
+      Suggest products from our collection. Be friendly and knowledgeable about jewelry trends and styling.`;
+    }
+    
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
-        { role: 'system', content: 'You are Glimmr\'s AI jewelry assistant. Provide helpful responses on jewelry, recommending earrings based on face shape, style, or ethnic outfits (e.g., sarees, lehengas). Suggest products from our collection.' },
+        { role: 'system', content: systemPrompt },
         { role: 'user', content: message }
       ],
+      max_tokens: 500,
+      temperature: 0.7,
     });
+    
     const response = completion.choices[0].message.content;
 
-    let suggestedProducts = [];
-    if (message.toLowerCase().includes('recommend') || message.toLowerCase().includes('earring')) {
-      const keywords = message.toLowerCase().split(' ').filter(word => ['studs', 'jhumkas', 'hoops', 'drops', 'chandeliers'].includes(word));
-      suggestedProducts = await Product.find({
-        category: 'earrings',
-        'availability.inStock': true,
-        ...(keywords.length > 0 && { subcategory: { $in: keywords } })
-      }).limit(3);
+    // Product recommendations based on context
+    if (context === 'clothing') {
+      // For clothing context, suggest based on message content
+      const clothingKeywords = message.toLowerCase().split(' ').filter(word => 
+        ['dress', 'saree', 'lehenga', 'kurta', 'top', 'blouse', 'pants', 'skirt'].includes(word)
+      );
+      
+      if (clothingKeywords.length > 0) {
+        // In a real app, you'd have a clothing products collection
+        // For now, we'll return jewelry that might complement the clothing
+        suggestedProducts = await Product.find({
+          'availability.inStock': true,
+          tags: { $in: ['ethnic', 'traditional', 'modern'] }
+        }).limit(3);
+      }
+    } else {
+      // For jewelry context, suggest jewelry products
+      if (message.toLowerCase().includes('recommend') || message.toLowerCase().includes('earring')) {
+        const keywords = message.toLowerCase().split(' ').filter(word => 
+          ['studs', 'jhumkas', 'hoops', 'drops', 'chandeliers', 'traditional', 'modern'].includes(word)
+        );
+        
+        suggestedProducts = await Product.find({
+          category: 'earrings',
+          'availability.inStock': true,
+          ...(keywords.length > 0 && { subcategory: { $in: keywords } })
+        }).limit(3);
+      }
     }
 
     res.json({
@@ -290,11 +522,53 @@ app.post('/api/chat', async (req, res) => {
         id: p._id,
         name: p.name,
         price: p.price,
-        image: p.images[0]
-      }))
+        image: p.images[0],
+        category: p.category
+      })),
+      context
     });
   } catch (error) {
+    console.error('Chat error:', error);
     res.status(500).json({ message: 'Chat error', error: error.message });
+  }
+});
+
+// Enhanced clothing recommendations endpoint
+app.post('/api/chat/clothing-recommendations', async (req, res) => {
+  const { occasion, bodyType, style, budget } = req.body;
+  
+  try {
+    const prompt = `Provide detailed clothing recommendations for:
+    Occasion: ${occasion}
+    Body Type: ${bodyType}
+    Style Preference: ${style}
+    Budget: ${budget}
+    
+    Give specific outfit suggestions, styling tips, and color recommendations.`;
+    
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        { 
+          role: 'system', 
+          content: 'You are a professional fashion stylist. Provide detailed, practical clothing recommendations with specific styling advice.' 
+        },
+        { role: 'user', content: prompt }
+      ],
+      max_tokens: 800,
+      temperature: 0.8,
+    });
+    
+    res.json({
+      recommendations: completion.choices[0].message.content,
+      occasion,
+      bodyType,
+      style,
+      budget
+    });
+  } catch (error) {
+    console.error('Clothing recommendations error:', error);
+    res.status(500).json({ message: 'Recommendations error', error: error.message });
   }
 });
 
@@ -310,6 +584,54 @@ app.get('/api/recommendations', authMiddleware, async (req, res) => {
     }).limit(5);
     res.json(products);
   } catch (error) {
+    console.error('Get recommendations error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// User profile endpoints
+app.get('/api/user/profile', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.userId).select('-password');
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    res.json(user);
+  } catch (error) {
+    console.error('Get profile error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+app.put('/api/user/profile', authMiddleware, async (req, res) => {
+  try {
+    const { name, phone, address, preferences } = req.body;
+    const user = await User.findById(req.user.userId);
+    
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Update allowed fields
+    if (name) user.name = name;
+    if (phone) user.phone = phone;
+    if (address) user.address = address;
+    if (preferences) user.preferences = preferences;
+    
+    await user.save();
+    
+    const userResponse = {
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      phone: user.phone,
+      address: user.address,
+      preferences: user.preferences
+    };
+    
+    res.json(userResponse);
+  } catch (error) {
+    console.error('Update profile error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
